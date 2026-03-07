@@ -1,0 +1,248 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/Billing",
+            "EstimatedCharges",
+            { "stat": "Maximum", "label": "Total Estimated Charges" }
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Daily Estimated AWS Charges",
+        "period": 86400,
+        "stat": "Maximum",
+        "yAxis": {
+          "left": {
+            "label": "USD",
+            "showUnits": false
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "Warning ($100)",
+              "value": 100,
+              "fill": "above",
+              "color": "#ff9900"
+            },
+            {
+              "label": "Critical ($200)",
+              "value": 200,
+              "fill": "above",
+              "color": "#ff6600"
+            },
+            {
+              "label": "Maximum ($280)",
+              "value": 280,
+              "fill": "above",
+              "color": "#d13212"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/Lambda",
+            "Invocations",
+            { "stat": "Sum", "label": "Lambda Invocations" }
+          ],
+          [".", "Errors", { "stat": "Sum", "label": "Lambda Errors" }],
+          [
+            ".",
+            "Duration",
+            {
+              "stat": "Average",
+              "label": "Avg Duration (ms)",
+              "yAxis": "right"
+            }
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Lambda Performance",
+        "period": 3600,
+        "yAxis": {
+          "left": {
+            "label": "Count"
+          },
+          "right": {
+            "label": "Milliseconds"
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 6,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/DynamoDB",
+            "ConsumedReadCapacityUnits",
+            { "stat": "Sum", "label": "Read Capacity Units" }
+          ],
+          [
+            ".",
+            "ConsumedWriteCapacityUnits",
+            { "stat": "Sum", "label": "Write Capacity Units" }
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "DynamoDB Capacity Usage",
+        "period": 3600,
+        "yAxis": {
+          "left": {
+            "label": "Units"
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 6,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/ApiGateway",
+            "Count",
+            { "stat": "Sum", "label": "API Requests" }
+          ],
+          [".", "4XXError", { "stat": "Sum", "label": "4XX Errors" }],
+          [".", "5XXError", { "stat": "Sum", "label": "5XX Errors" }]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "API Gateway Requests",
+        "period": 3600,
+        "yAxis": {
+          "left": {
+            "label": "Count"
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 12,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/S3",
+            "BucketSizeBytes",
+            { "stat": "Average", "label": "Storage Size (Bytes)" }
+          ],
+          [
+            ".",
+            "NumberOfObjects",
+            { "stat": "Average", "label": "Object Count", "yAxis": "right" }
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "S3 Storage Usage",
+        "period": 86400,
+        "yAxis": {
+          "left": {
+            "label": "Bytes"
+          },
+          "right": {
+            "label": "Objects"
+          }
+        }
+      }
+    },
+    {
+      "type": "log",
+      "x": 8,
+      "y": 12,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/lambda/roottrust-ai-verify'\n| fields @timestamp, @message\n| filter @message like /ERROR/\n| sort @timestamp desc\n| limit 20",
+        "region": "us-east-1",
+        "title": "Recent Lambda Errors",
+        "storeType": "CloudWatch Logs"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 12,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/Bedrock",
+            "Invocations",
+            { "stat": "Sum", "label": "Bedrock Invocations" }
+          ],
+          [
+            ".",
+            "InvocationLatency",
+            { "stat": "Average", "label": "Avg Latency (ms)", "yAxis": "right" }
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Bedrock AI Usage",
+        "period": 3600,
+        "yAxis": {
+          "left": {
+            "label": "Invocations"
+          },
+          "right": {
+            "label": "Milliseconds"
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 18,
+      "width": 24,
+      "height": 3,
+      "properties": {
+        "metrics": [["AWS/Billing", "EstimatedCharges", { "stat": "Maximum" }]],
+        "view": "singleValue",
+        "region": "us-east-1",
+        "title": "Current Month Estimated Charges",
+        "period": 86400,
+        "stat": "Maximum"
+      }
+    }
+  ]
+}

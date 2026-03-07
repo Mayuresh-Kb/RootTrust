@@ -1,0 +1,44 @@
+{
+  "budgets": [
+    {
+      "name": "RootTrust-Warning-Alert",
+      "amount": 100,
+      "threshold": 100,
+      "description": "Warning alert at $100 monthly spend - informational only"
+    },
+    {
+      "name": "RootTrust-Critical-Alert",
+      "amount": 200,
+      "threshold": 100,
+      "description": "Critical alert at $200 monthly spend - manual review required"
+    },
+    {
+      "name": "RootTrust-Maximum-Alert",
+      "amount": 280,
+      "threshold": 100,
+      "description": "Maximum alert at $280 monthly spend - immediate intervention required"
+    },
+    {
+      "name": "RootTrust-Main-Budget",
+      "amount": 300,
+      "thresholds": [
+        {
+          "percentage": 80,
+          "amount": 240,
+          "description": "80% budget threshold ($240)"
+        },
+        {
+          "percentage": 90,
+          "amount": 270,
+          "description": "90% budget threshold ($270)"
+        }
+      ],
+      "description": "Main monthly budget with percentage-based alerts"
+    }
+  ],
+  "timeUnit": "MONTHLY",
+  "budgetType": "COST",
+  "costFilters": {
+    "TagKeyValue": ["user:Project$RootTrust"]
+  }
+}

@@ -1,0 +1,1834 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: RootTrust Marketplace - AI-powered serverless marketplace platform
+
+# Global configuration for all Lambda functions
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 10
+    MemorySize: 256
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref RootTrustDataTable
+        BUCKET_NAME: !Ref RootTrustAssetsBucket
+        JWT_SECRET_ARN: !Ref JWTSecret
+        BEDROCK_REGION: !Ref AWS::Region
+        STAGE: !Ref Stage
+        SENDER_EMAIL: !Ref SenderEmail
+        ENABLE_EMAIL_VERIFICATION: "false"
+    Tracing: Active
+  Api:
+    Cors:
+      AllowOrigin: "'*'"
+      AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      MaxAge: "'3600'"
+    TracingEnabled: true
+
+# Parameters for environment-specific configuration
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    Description: Deployment stage (dev or prod)
+
+  MonthlyBudgetLimit:
+    Type: Number
+    Default: 300
+    Description: Monthly AWS budget limit in USD
+
+  BudgetAlertThreshold:
+    Type: Number
+    Default: 80
+    Description: Budget alert threshold percentage (default 80%)
+
+  SenderEmail:
+    Type: String
+    Default: noreply@roottrust.com
+    Description: Email address for sending system notifications (must be verified in SES)
+
+Resources:
+  # ========================================
+  # DynamoDB Table - Single-Table Design
+  # ========================================
+  RootTrustDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "RootTrustData-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        # Primary Key
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        # GSI1 - Category and Seasonal Queries
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        # GSI2 - Farmer/Consumer Lookups
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+        # GSI3 - Time-based Queries
+        - AttributeName: GSI3PK
+          AttributeType: S
+        - AttributeName: GSI3SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        # GSI1: Category/Seasonal queries (e.g., CATEGORY#vegetables)
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI2: Farmer/Consumer lookups (e.g., FARMER#userId, CONSUMER#userId)
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI3: Time-based queries (e.g., STATUS#active, RELEASE#endDate)
+        - IndexName: GSI3
+          KeySchema:
+            - AttributeName: GSI3PK
+              KeyType: HASH
+            - AttributeName: GSI3SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: RootTrust
+        - Key: Stage
+          Value: !Ref Stage
+
+  # ========================================
+  # S3 Bucket for Assets
+  # ========================================
+  RootTrustAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "roottrust-assets-${Stage}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+            AllowedHeaders:
+              - "*"
+            MaxAge: 3600
+      LifecycleConfiguration:
+        Rules:
+          # Transition product images to Standard-IA after 30 days
+          - Id: TransitionToStandardIA
+            Status: Enabled
+            Prefix: "products/"
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+          # Delete temporary uploads after 1 day
+          - Id: DeleteTempUploads
+            Status: Enabled
+            Prefix: "temp-uploads/"
+            ExpirationInDays: 1
+      Tags:
+        - Key: Project
+          Value: RootTrust
+        - Key: Stage
+          Value: !Ref Stage
+
+  # S3 Bucket Policy for Lambda access
+  RootTrustAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RootTrustAssetsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "${RootTrustAssetsBucket.Arn}/*"
+
+  # ========================================
+  # API Gateway
+  # ========================================
+  RootTrustApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "RootTrustAPI-${Stage}"
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: JWTAuthorizer
+        Authorizers:
+          JWTAuthorizer:
+            FunctionArn: !GetAtt JWTAuthorizerFunction.Arn
+            FunctionPayloadType: REQUEST
+            Identity:
+              Headers:
+                - Authorization
+      # Cache Configuration (DISABLED by default for cost optimization)
+      # Cost: $0.02/hour = $14.40/month for 0.5GB cache
+      # Enable only when traffic increases (>10,000 requests/day)
+      # See COST_OPTIMIZATION.md and API_GATEWAY_CACHING.md for details
+      CacheClusterEnabled: false
+      CacheClusterSize: "0.5" # 0.5GB cache (smallest size)
+      MethodSettings:
+        # Default settings for all endpoints
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 500
+          ThrottlingRateLimit: 100
+          # LoggingLevel: INFO  # Disabled - requires CloudWatch Logs role in account settings
+          # DataTraceEnabled: true  # Disabled - requires CloudWatch Logs role
+          MetricsEnabled: true
+          CachingEnabled: false
+          CacheDataEncrypted: true
+        # GET /products - Product listing endpoint
+        # Cache for 5 minutes (300 seconds) when caching is enabled
+        # Cache key includes: query parameters (category, seasonal, giTag, search)
+        - ResourcePath: "/products"
+          HttpMethod: "GET"
+          ThrottlingBurstLimit: 500
+          ThrottlingRateLimit: 100
+          CachingEnabled: false # Set to true when CacheClusterEnabled is true
+          CacheTtlInSeconds: 300 # 5 minutes
+          CacheDataEncrypted: true
+          # Cache key parameters are automatically included from query strings
+        # GET /products/{productId} - Product detail endpoint
+        # Cache for 1 hour (3600 seconds) when caching is enabled
+        # Cache key includes: productId path parameter
+        - ResourcePath: "/products/*"
+          HttpMethod: "GET"
+          ThrottlingBurstLimit: 500
+          ThrottlingRateLimit: 100
+          CachingEnabled: false # Set to true when CacheClusterEnabled is true
+          CacheTtlInSeconds: 3600 # 1 hour
+          CacheDataEncrypted: true
+      Tags:
+        Project: RootTrust
+        Stage: !Ref Stage
+
+  # ========================================
+  # Secrets Manager
+  # ========================================
+  JWTSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "RootTrust-JWT-Secret-${Stage}"
+      Description: JWT signing secret for RootTrust authentication
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: "secret"
+        PasswordLength: 64
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Project
+          Value: RootTrust
+        - Key: Stage
+          Value: !Ref Stage
+
+  APIKeysSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "RootTrust-API-Keys-${Stage}"
+      Description: API keys for external services (Razorpay, Stripe, etc.)
+      SecretString: !Sub |
+        {
+          "razorpay_key_id": "PLACEHOLDER",
+          "razorpay_key_secret": "PLACEHOLDER",
+          "stripe_api_key": "PLACEHOLDER",
+          "stripe_webhook_secret": "PLACEHOLDER"
+        }
+      Tags:
+        - Key: Project
+          Value: RootTrust
+        - Key: Stage
+          Value: !Ref Stage
+
+  # ========================================
+  # Lambda Functions
+  # ========================================
+
+  # JWT Authorizer Function
+  JWTAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-JWTAuthorizer-${Stage}"
+      CodeUri: backend/auth/
+      Handler: authorizer.handler
+      Description: JWT token validation authorizer
+      Environment:
+        Variables:
+          JWT_SECRET_ARN: !Ref JWTSecret
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref JWTSecret
+
+  # Authentication Service Functions
+  AuthRegisterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Auth-Register-${Stage}"
+      CodeUri: backend/auth/
+      Handler: register.handler
+      Description: User registration endpoint
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        RegisterApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /auth/register
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  AuthLoginFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Auth-Login-${Stage}"
+      CodeUri: backend/auth/
+      Handler: login.handler
+      Description: User login endpoint
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        LoginApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /auth/login
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  # Product Service Functions
+  ProductCreateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Product-Create-${Stage}"
+      CodeUri: backend/products/
+      Handler: create_product.handler
+      Description: Product creation endpoint for farmers
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BUCKET_NAME: !Ref RootTrustAssetsBucket
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - S3CrudPolicy:
+            BucketName: !Ref RootTrustAssetsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        CreateProductApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /products
+            Method: POST
+
+  ProductListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Product-List-${Stage}"
+      CodeUri: backend/products/
+      Handler: list_products.handler
+      Description: Product listing endpoint with filters and pagination
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        ListProductsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /products
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+  ProductDetailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Product-Detail-${Stage}"
+      CodeUri: backend/products/
+      Handler: get_product_detail.handler
+      Description: Product detail endpoint with farmer profile and reviews
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        GetProductDetailApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /products/{productId}
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+  ProductUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Product-Update-${Stage}"
+      CodeUri: backend/products/
+      Handler: update_product.handler
+      Description: Product update endpoint for farmers to update their products
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        UpdateProductApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /products/{productId}
+            Method: PUT
+
+  ProductImageUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Product-ImageUpload-${Stage}"
+      CodeUri: backend/products/
+      Handler: update_product_images.handler
+      Description: Product image upload handler to update product with image URLs
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        UpdateProductImagesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /products/{productId}/images
+            Method: POST
+
+  # AI Verification Service Functions
+  AIVerifyProductFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-VerifyProduct-${Stage}"
+      CodeUri: backend/ai/
+      Handler: verify_product.handler
+      Description: AI-powered fraud detection using Amazon Bedrock
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BEDROCK_REGION: !Ref AWS::Region
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        VerifyProductApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/verify-product
+            Method: POST
+
+  AIVerificationStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-VerificationStatus-${Stage}"
+      CodeUri: backend/ai/
+      Handler: verification_status.handler
+      Description: Retrieve product verification status and scores
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        VerificationStatusApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/verification-status/{productId}
+            Method: GET
+
+  # AI Marketing Service Functions
+  AIGenerateDescriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-GenerateDescription-${Stage}"
+      CodeUri: backend/ai/
+      Handler: generate_description.handler
+      Description: AI-powered product description generation using Amazon Bedrock
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BEDROCK_REGION: !Ref AWS::Region
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        GenerateDescriptionApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/generate-description
+            Method: POST
+
+  AIGenerateNamesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-GenerateNames-${Stage}"
+      CodeUri: backend/ai/
+      Handler: generate_names.handler
+      Description: AI-powered product name suggestion using Amazon Bedrock
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BEDROCK_REGION: !Ref AWS::Region
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        GenerateNamesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/generate-names
+            Method: POST
+
+  AIEnhanceDescriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-EnhanceDescription-${Stage}"
+      CodeUri: backend/ai/
+      Handler: enhance_description.handler
+      Description: AI-powered description enhancement using Amazon Bedrock
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          BEDROCK_REGION: !Ref AWS::Region
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        EnhanceDescriptionApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/enhance-description
+            Method: POST
+
+  AIGenerateSocialFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-GenerateSocial-${Stage}"
+      CodeUri: backend/ai/
+      Handler: generate_social.handler
+      Description: AI-powered social media content generation with seasonal urgency
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BEDROCK_REGION: !Ref AWS::Region
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        GenerateSocialApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/generate-social
+            Method: POST
+
+  AIGenerateLaunchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-AI-GenerateLaunch-${Stage}"
+      CodeUri: backend/ai/
+      Handler: generate_launch.handler
+      Description: AI-powered launch announcement generation for new products
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BEDROCK_REGION: !Ref AWS::Region
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        GenerateLaunchApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /ai/generate-launch
+            Method: POST
+
+  # Order Service Functions
+  OrderCreateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Order-Create-${Stage}"
+      CodeUri: backend/orders/
+      Handler: create_order.handler
+      Description: Order creation endpoint for consumers to purchase products
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        CreateOrderApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /orders
+            Method: POST
+
+  OrderListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Order-List-${Stage}"
+      CodeUri: backend/orders/
+      Handler: list_orders.handler
+      Description: Order listing endpoint for consumers and farmers to view their orders
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        ListOrdersApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /orders
+            Method: GET
+
+  OrderDetailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Order-Detail-${Stage}"
+      CodeUri: backend/orders/
+      Handler: get_order_detail.handler
+      Description: Order detail endpoint for consumers and farmers to view complete order details
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        GetOrderDetailApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /orders/{orderId}
+            Method: GET
+
+  OrderStatusUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Order-StatusUpdate-${Stage}"
+      CodeUri: backend/orders/
+      Handler: update_order_status.handler
+      Description: Order status update endpoint for farmers to update order fulfillment status
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        UpdateOrderStatusApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /orders/{orderId}/status
+            Method: PUT
+
+  # ========================================
+  # Payment Service Functions
+  # ========================================
+  PaymentInitiateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Payment-Initiate-${Stage}"
+      CodeUri: backend/payments/
+      Handler: initiate_payment.handler
+      Description: Payment initiation endpoint for consumers to create payment sessions
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+          USE_MOCK_PAYMENT: "true"
+          PAYMENT_SUCCESS_URL: !Sub "https://${Stage}.roottrust.com/payment/success"
+          PAYMENT_CANCEL_URL: !Sub "https://${Stage}.roottrust.com/payment/cancel"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        InitiatePaymentApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /payments/initiate
+            Method: POST
+
+  PaymentWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Payment-Webhook-${Stage}"
+      CodeUri: backend/payments/
+      Handler: webhook_handler.handler
+      Description: Payment webhook handler for Razorpay/Stripe payment status updates
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          USE_MOCK_PAYMENT: "true"
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - SESCrudPolicy:
+            IdentityName: !Ref SenderEmail
+      Events:
+        PaymentWebhookApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /payments/webhook
+            Method: POST
+
+  PaymentStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Payment-Status-${Stage}"
+      CodeUri: backend/payments/
+      Handler: get_payment_status.handler
+      Description: Payment status retrieval endpoint to check transaction status
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        GetPaymentStatusApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /payments/{transactionId}
+            Method: GET
+
+  # ========================================
+  # Review Service Functions
+  # ========================================
+  ReviewCreateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Review-Create-${Stage}"
+      CodeUri: backend/reviews/
+      Handler: create_review.handler
+      Description: Review submission endpoint for consumers to submit product reviews
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          BUCKET_NAME: !Ref RootTrustAssetsBucket
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - S3CrudPolicy:
+            BucketName: !Ref RootTrustAssetsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+      Events:
+        CreateReviewApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /reviews
+            Method: POST
+
+  ReviewListProductFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Review-ListProduct-${Stage}"
+      CodeUri: backend/reviews/
+      Handler: list_product_reviews.handler
+      Description: Product reviews listing endpoint to retrieve all reviews for a product
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        ListProductReviewsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /reviews/product/{productId}
+            Method: GET
+
+  ReviewListFarmerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Review-ListFarmer-${Stage}"
+      CodeUri: backend/reviews/
+      Handler: list_farmer_reviews.handler
+      Description: Farmer reviews listing endpoint to retrieve all reviews for a farmer's products
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        ListFarmerReviewsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /reviews/farmer/{farmerId}
+            Method: GET
+
+  ReviewRequestTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Review-RequestTrigger-${Stage}"
+      CodeUri: backend/reviews/
+      Handler: review_request_trigger.handler
+      Description: DynamoDB Stream trigger to send review request emails when orders are delivered
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+              Resource: !GetAtt RootTrustDataTable.StreamArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        OrderStatusStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RootTrustDataTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            Enabled: true
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["MODIFY"], "dynamodb": {"NewImage": {"EntityType": {"S": ["Order"]}, "status": {"S": ["delivered"]}}}}'
+
+  SalesStreakTrackingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-SalesStreak-Tracking-${Stage}"
+      CodeUri: backend/referrals/
+      Handler: track_sales_streak.handler
+      Description: DynamoDB Stream trigger to track farmer sales streaks and award bonuses
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+              Resource: !GetAtt RootTrustDataTable.StreamArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        ReviewStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RootTrustDataTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            Enabled: true
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"], "dynamodb": {"NewImage": {"EntityType": {"S": ["Review"]}}}}'
+
+  FeaturedStatusUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Featured-Status-Update-${Stage}"
+      CodeUri: backend/referrals/
+      Handler: update_featured_status.handler
+      Description: Updates farmer featured status based on average product authenticity confidence
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+              Resource: !GetAtt RootTrustDataTable.StreamArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        ProductVerificationStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RootTrustDataTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            Enabled: true
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT", "MODIFY"], "dynamodb": {"NewImage": {"EntityType": {"S": ["Product"]}, "verificationStatus": {"S": ["approved"]}}}}'
+
+  FarmerBonusDashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Farmer-BonusDashboard-${Stage}"
+      CodeUri: backend/referrals/
+      Handler: get_farmer_bonuses.handler
+      Description: Farmer bonus dashboard endpoint to display bonus status and progress
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        GetFarmerBonusesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /analytics/farmer/{farmerId}/bonuses
+            Method: GET
+
+  # ========================================
+  # Analytics Service Functions
+  # ========================================
+  FarmerAnalyticsDashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Farmer-Analytics-Dashboard-${Stage}"
+      CodeUri: backend/analytics/
+      Handler: get_farmer_analytics.handler
+      Description: Farmer analytics dashboard endpoint for performance metrics
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        GetFarmerAnalyticsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /analytics/farmer/{farmerId}
+            Method: GET
+
+  ProductAnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Product-Analytics-${Stage}"
+      CodeUri: backend/analytics/
+      Handler: get_product_analytics.handler
+      Description: Product analytics endpoint for product performance metrics
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        GetProductAnalyticsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /analytics/product/{productId}
+            Method: GET
+
+  SeasonalTrendsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Seasonal-Trends-${Stage}"
+      CodeUri: backend/analytics/
+      Handler: get_seasonal_trends.handler
+      Description: Seasonal trends analytics endpoint for market insights
+      Timeout: 60
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        GetSeasonalTrendsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /analytics/trends
+            Method: GET
+
+  # ========================================
+  # Promotion Service Functions
+  # ========================================
+  PromotionCreateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Promotion-Create-${Stage}"
+      CodeUri: backend/promotions/
+      Handler: create_promotion.handler
+      Description: Promotion creation endpoint for farmers
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+          BEDROCK_REGION: !Ref AWS::Region
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+      Events:
+        CreatePromotionApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /promotions
+            Method: POST
+
+  PromotionListActiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Promotion-ListActive-${Stage}"
+      CodeUri: backend/promotions/
+      Handler: list_active_promotions.handler
+      Description: List active promotions endpoint
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        ListActivePromotionsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /promotions
+            Method: GET
+
+  PromotionUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Promotion-Update-${Stage}"
+      CodeUri: backend/promotions/
+      Handler: update_promotion.handler
+      Description: Promotion update endpoint for farmers
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}-*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        UpdatePromotionApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /promotions/{promotionId}
+            Method: PUT
+
+  PromotionExpiryCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Promotion-ExpiryCheck-${Stage}"
+      CodeUri: backend/promotions/
+      Handler: expiry_check.handler
+      Description: Scheduled function to check for expired promotions and send summary emails
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        HourlySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+            Description: Hourly check for expired promotions
+            Enabled: true
+
+  # ========================================
+  # Limited Release Service Functions
+  # ========================================
+  LimitedReleaseListActiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-LimitedRelease-ListActive-${Stage}"
+      CodeUri: backend/limited_releases/
+      Handler: list_active_limited_releases.handler
+      Description: List active limited releases endpoint
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        ListActiveLimitedReleasesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /limited-releases
+            Method: GET
+
+  LimitedReleaseDetailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-LimitedRelease-Detail-${Stage}"
+      CodeUri: backend/limited_releases/
+      Handler: get_limited_release_detail.handler
+      Description: Get limited release detail with countdown timer
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        GetLimitedReleaseDetailApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /limited-releases/{releaseId}
+            Method: GET
+
+  LimitedReleasePurchaseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-LimitedRelease-Purchase-${Stage}"
+      CodeUri: backend/limited_releases/
+      Handler: purchase_limited_release.handler
+      Description: Purchase from limited release with atomic quantity decrement
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_NAME: !Sub "RootTrust-JWT-Secret-${Stage}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:RootTrust-JWT-Secret-${Stage}*"
+      Events:
+        PurchaseLimitedReleaseApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /limited-releases/{releaseId}/purchase
+            Method: POST
+            Auth:
+              Authorizer: JWTAuthorizer
+
+  LimitedReleaseExpiryCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-LimitedRelease-ExpiryCheck-${Stage}"
+      CodeUri: backend/limited_releases/
+      Handler: expiry_check.handler
+      Description: Scheduled function to check for expired limited releases every 5 minutes
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        FiveMinuteSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Check for expired limited releases every 5 minutes
+            Enabled: true
+
+  # ========================================
+  # Notification Service Functions
+  # ========================================
+  NotificationPreferencesUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Notification-PreferencesUpdate-${Stage}"
+      CodeUri: backend/notifications/
+      Handler: update_preferences.handler
+      Description: Update user notification preferences
+      Runtime: python3.11
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          JWT_SECRET_KEY: !Sub "{{resolve:secretsmanager:RootTrust-JWT-Secret-${Stage}:SecretString:secret}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        UpdatePreferences:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /notifications/preferences
+            Method: PUT
+            Auth:
+              Authorizer: JWTAuthorizer
+
+  NewProductNotificationTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Notification-NewProductTrigger-${Stage}"
+      CodeUri: backend/notifications/
+      Handler: new_product_trigger.handler
+      Description: DynamoDB Stream trigger to send new product notifications when products are approved
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+              Resource: !GetAtt RootTrustDataTable.StreamArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        ProductStatusStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RootTrustDataTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            Enabled: true
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["MODIFY"], "dynamodb": {"NewImage": {"EntityType": {"S": ["Product"]}, "verificationStatus": {"S": ["approved"]}}, "OldImage": {"verificationStatus": {"S": ["pending"]}}}}'
+
+  # Followed Farmer Notification Trigger Lambda
+  FollowedFarmerNotificationTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Notification-FollowedFarmerTrigger-${Stage}"
+      CodeUri: backend/notifications/
+      Handler: followed_farmer_trigger.handler
+      Description: DynamoDB Stream trigger to send notifications to followers when a farmer creates a new product
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RootTrustDataTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+              Resource: !GetAtt RootTrustDataTable.StreamArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        ProductInsertStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RootTrustDataTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            Enabled: true
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"], "dynamodb": {"NewImage": {"EntityType": {"S": ["Product"]}}}}'
+
+  # Unsubscribe Lambda (Public endpoint - no authentication required)
+  UnsubscribeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "RootTrust-Notification-Unsubscribe-${Stage}"
+      CodeUri: backend/notifications/
+      Handler: unsubscribe.handler
+      Description: Public endpoint for users to unsubscribe from marketing emails
+      Runtime: python3.11
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RootTrustDataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RootTrustDataTable
+      Events:
+        Unsubscribe:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RootTrustApi
+            Path: /notifications/unsubscribe
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+
+  # ========================================
+  # SNS Topic for Cost Alerts
+  # ========================================
+  CostAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "RootTrust-Cost-Alerts-${Stage}"
+      DisplayName: RootTrust Cost Monitoring Alerts
+      Subscription:
+        - Endpoint: !Ref SenderEmail
+          Protocol: email
+
+  # ========================================
+  # AWS Budgets Alerts (Multiple Thresholds)
+  # ========================================
+
+  # Budget Alert 1: Warning at $100
+  RootTrustBudgetWarning:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "RootTrust-Budget-Warning-${Stage}"
+        BudgetLimit:
+          Amount: 100
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: ABSOLUTE_VALUE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref SenderEmail
+
+  # Budget Alert 2: Critical at $200
+  RootTrustBudgetCritical:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "RootTrust-Budget-Critical-${Stage}"
+        BudgetLimit:
+          Amount: 200
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: ABSOLUTE_VALUE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref SenderEmail
+
+  # Budget Alert 3: Maximum at $280
+  RootTrustBudgetMaximum:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "RootTrust-Budget-Maximum-${Stage}"
+        BudgetLimit:
+          Amount: 280
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: ABSOLUTE_VALUE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref SenderEmail
+
+  # Main Budget with 80% and 90% Thresholds
+  RootTrustBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "RootTrust-Monthly-Budget-${Stage}"
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetLimit
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref SenderEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 90
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref SenderEmail
+
+  # ========================================
+  # IAM Roles and Policies
+  # ========================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "RootTrust-Lambda-Execution-${Stage}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt RootTrustDataTable.Arn
+                  - !Sub "${RootTrustDataTable.Arn}/index/*"
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RootTrustAssetsBucket.Arn
+                  - !Sub "${RootTrustAssetsBucket.Arn}/*"
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref JWTSecret
+                  - !Ref APIKeysSecret
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+        - PolicyName: SESAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
+        - PolicyName: DynamoDBStreamsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt RootTrustDataTable.StreamArn
+
+# ========================================
+# Outputs
+# ========================================
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${RootTrustApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref RootTrustDataTable
+    Export:
+      Name: !Sub "${AWS::StackName}-TableName"
+
+  S3BucketName:
+    Description: S3 bucket name for assets
+    Value: !Ref RootTrustAssetsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketName"
+
+  JWTSecretArn:
+    Description: ARN of JWT secret in Secrets Manager
+    Value: !Ref JWTSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-JWTSecretArn"
+
+  APIKeysSecretArn:
+    Description: ARN of API keys secret in Secrets Manager
+    Value: !Ref APIKeysSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-APIKeysSecretArn"
+
+  LambdaExecutionRoleArn:
+    Description: ARN of Lambda execution role
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaRoleArn"

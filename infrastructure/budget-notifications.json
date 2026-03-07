@@ -1,0 +1,80 @@
+{
+  "snsTopicName": "RootTrust-Cost-Alerts",
+  "subscriptions": [
+    {
+      "protocol": "email",
+      "endpoint": "admin@roottrust.example.com",
+      "description": "Primary admin email for cost alerts"
+    }
+  ],
+  "notificationTypes": [
+    {
+      "type": "ACTUAL",
+      "comparisonOperator": "GREATER_THAN",
+      "description": "Alert when actual costs exceed threshold"
+    },
+    {
+      "type": "FORECASTED",
+      "comparisonOperator": "GREATER_THAN",
+      "description": "Alert when forecasted costs are projected to exceed threshold"
+    }
+  ],
+  "alertLevels": [
+    {
+      "level": "warning",
+      "threshold": 100,
+      "thresholdType": "ABSOLUTE_VALUE",
+      "actions": [
+        "Send email notification",
+        "Review cost breakdown",
+        "No immediate action required"
+      ]
+    },
+    {
+      "level": "critical",
+      "threshold": 200,
+      "thresholdType": "ABSOLUTE_VALUE",
+      "actions": [
+        "Send email notification",
+        "Review all active services",
+        "Consider disabling non-essential features",
+        "Manual review required"
+      ]
+    },
+    {
+      "level": "maximum",
+      "threshold": 280,
+      "thresholdType": "ABSOLUTE_VALUE",
+      "actions": [
+        "Send email + SMS notification",
+        "Immediate manual intervention required",
+        "Consider emergency cost controls",
+        "Review COST_OPTIMIZATION.md emergency procedures"
+      ]
+    },
+    {
+      "level": "percentage-80",
+      "threshold": 80,
+      "thresholdType": "PERCENTAGE",
+      "amount": 240,
+      "actions": [
+        "Send email notification",
+        "Monitor daily costs closely",
+        "Review Bedrock usage",
+        "Consider increasing cache TTL"
+      ]
+    },
+    {
+      "level": "percentage-90",
+      "threshold": 90,
+      "thresholdType": "PERCENTAGE",
+      "amount": 270,
+      "actions": [
+        "Send email notification",
+        "Urgent review required",
+        "Consider enabling emergency cost controls",
+        "Reduce EventBridge frequency"
+      ]
+    }
+  ]
+}

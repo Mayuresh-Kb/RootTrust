@@ -1,0 +1,465 @@
+"""
+Unit tests for payment status retrieval endpoint.
+Tests GET /payments/{transactionId} endpoint functionality.
+"""
+import json
+import pytest
+from datetime import datetime, timedelta
+from unittest.mock import patch, MagicMock
+import sys
+import os
+
+# Add backend paths to sys.path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend', 'shared'))
+
+# Import after path setup
+from shared.constants import UserRole, PaymentStatus, PaymentGateway, PaymentMethod, OrderStatus
+from shared.auth import generate_jwt_token
+
+# Import the handler module
+from payments import get_payment_status
+
+
+@pytest.fixture
+def mock_env(monkeypatch):
+    """Set up mock environment variables."""
+    monkeypatch.setenv('DYNAMODB_TABLE_NAME', 'RootTrustData-test')
+    monkeypatch.setenv('JWT_SECRET_KEY', 'test-secret-key-12345')
+
+
+@pytest.fixture
+def mock_transaction():
+    """Mock transaction data."""
+    return {
+        'PK': 'TRANSACTION#txn_test123',
+        'SK': 'METADATA',
+        'EntityType': 'Transaction',
+        'transactionId': 'txn_test123',
+        'orderId': 'order_test456',
+        'amount': 1500.00,
+        'currency': 'INR',
+        'status': PaymentStatus.COMPLETED.value,
+        'paymentMethod': PaymentMethod.CARD.value,
+        'paymentGateway': PaymentGateway.STRIPE.value,
+        'createdAt': '2024-01-15T10:00:00Z',
+        'completedAt': '2024-01-15T10:05:00Z',
+        'GSI2PK': 'ORDER#order_test456',
+        'GSI2SK': 'TRANSACTION#2024-01-15T10:00:00Z'
+    }
+
+
+@pytest.fixture
+def mock_order():
+    """Mock order data."""
+    return {
+        'PK': 'ORDER#order_test456',
+        'SK': 'METADATA',
+        'EntityType': 'Order',
+        'orderId': 'order_test456',
+        'consumerId': 'consumer123',
+        'farmerId': 'farmer456',
+        'productId': 'product789',
+        'productName': 'Organic Tomatoes',
+        'quantity': 5,
+        'unitPrice': 300.00,
+        'totalAmount': 1500.00,
+        'status': OrderStatus.CONFIRMED.value,
+        'paymentStatus': PaymentStatus.COMPLETED.value,
+        'transactionId': 'txn_test123',
+        'createdAt': '2024-01-15T09:00:00Z',
+        'updatedAt': '2024-01-15T10:05:00Z'
+    }
+
+
+@pytest.fixture
+def mock_jwt_token():
+    """Mock JWT token."""
+    return "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.token"
+
+
+@pytest.fixture
+def api_gateway_event(mock_jwt_token):
+    """Mock API Gateway event."""
+    return {
+        'headers': {
+            'Authorization': mock_jwt_token
+        },
+        'pathParameters': {
+            'transactionId': 'txn_test123'
+        },
+        'requestContext': {
+            'requestId': 'test-request-id'
+        }
+    }
+
+
+class TestPaymentStatusRetrieval:
+    """Test cases for payment status retrieval endpoint."""
+    
+    def test_successful_status_retrieval_consumer(self, mock_env, api_gateway_event, mock_transaction, mock_order):
+        """Test successful transaction status retrieval by consumer."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            # Mock authentication - consumer user
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            # Mock database calls
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            # Call handler
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            # Verify response
+            assert response['statusCode'] == 200
+            
+            body = json.loads(response['body'])
+            assert body['transactionId'] == 'txn_test123'
+            assert body['orderId'] == 'order_test456'
+            assert body['amount'] == 1500.00
+            assert body['currency'] == 'INR'
+            assert body['status'] == PaymentStatus.COMPLETED.value
+            assert body['paymentMethod'] == PaymentMethod.CARD.value
+            assert body['paymentGateway'] == PaymentGateway.STRIPE.value
+            assert body['createdAt'] == '2024-01-15T10:00:00Z'
+            assert body['completedAt'] == '2024-01-15T10:05:00Z'
+    
+    def test_successful_status_retrieval_farmer(self, mock_env, api_gateway_event, mock_transaction, mock_order):
+        """Test successful transaction status retrieval by farmer."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            # Mock authentication - farmer user
+            mock_auth.return_value = {
+                'userId': 'farmer456',
+                'role': UserRole.FARMER.value,
+                'email': 'farmer@test.com'
+            }
+            
+            # Mock database calls
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            # Call handler
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            # Verify response
+            assert response['statusCode'] == 200
+            
+            body = json.loads(response['body'])
+            assert body['transactionId'] == 'txn_test123'
+            assert body['orderId'] == 'order_test456'
+    
+    def test_pending_transaction_status(self, api_gateway_event, mock_transaction, mock_order):
+        """Test retrieval of pending transaction."""
+        # Modify transaction to pending status
+        mock_transaction['status'] = PaymentStatus.PENDING.value
+        mock_transaction['completedAt'] = None
+        
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 200
+            body = json.loads(response['body'])
+            assert body['status'] == PaymentStatus.PENDING.value
+            assert body['completedAt'] is None
+    
+    def test_failed_transaction_status(self, api_gateway_event, mock_transaction, mock_order):
+        """Test retrieval of failed transaction."""
+        # Modify transaction to failed status
+        mock_transaction['status'] = PaymentStatus.FAILED.value
+        mock_transaction['completedAt'] = '2024-01-15T10:05:00Z'
+        
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 200
+            body = json.loads(response['body'])
+            assert body['status'] == PaymentStatus.FAILED.value
+    
+    def test_missing_authorization_header(self, api_gateway_event):
+        """Test request without authorization header."""
+        # Remove authorization header
+        api_gateway_event['headers'] = {}
+        
+        response = get_payment_status.handler(api_gateway_event, None)
+        
+        assert response['statusCode'] == 401
+        body = json.loads(response['body'])
+        assert body['error']['code'] == 'UNAUTHORIZED'
+        assert 'Authorization header is required' in body['error']['message']
+    
+    def test_invalid_jwt_token(self, api_gateway_event):
+        """Test request with invalid JWT token."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth:
+            mock_auth.side_effect = Exception('Invalid token')
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 401
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'INVALID_TOKEN'
+    
+    def test_missing_transaction_id(self, api_gateway_event):
+        """Test request without transaction ID in path."""
+        # Remove transaction ID from path parameters
+        api_gateway_event['pathParameters'] = {}
+        
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth:
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 400
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'VALIDATION_ERROR'
+            assert 'transactionId is required' in body['error']['message']
+    
+    def test_transaction_not_found(self, api_gateway_event):
+        """Test retrieval of non-existent transaction."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            # Transaction not found
+            mock_get_item.return_value = None
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 404
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'RESOURCE_NOT_FOUND'
+            assert 'Transaction with ID txn_test123 not found' in body['error']['message']
+    
+    def test_unauthorized_consumer_access(self, api_gateway_event, mock_transaction, mock_order):
+        """Test consumer trying to access another consumer's transaction."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            # Different consumer trying to access
+            mock_auth.return_value = {
+                'userId': 'different_consumer',
+                'role': UserRole.CONSUMER.value,
+                'email': 'other@test.com'
+            }
+            
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 403
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'FORBIDDEN'
+            assert 'You do not have permission' in body['error']['message']
+    
+    def test_unauthorized_farmer_access(self, api_gateway_event, mock_transaction, mock_order):
+        """Test farmer trying to access another farmer's transaction."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            # Different farmer trying to access
+            mock_auth.return_value = {
+                'userId': 'different_farmer',
+                'role': UserRole.FARMER.value,
+                'email': 'otherfarmer@test.com'
+            }
+            
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 403
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'FORBIDDEN'
+    
+    def test_database_error(self, api_gateway_event):
+        """Test handling of database errors."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            # Simulate database error
+            mock_get_item.side_effect = Exception('Database connection failed')
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 503
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'SERVICE_UNAVAILABLE'
+    
+    def test_transaction_without_order(self, api_gateway_event, mock_transaction):
+        """Test transaction that doesn't have an associated order."""
+        # Remove orderId from transaction
+        mock_transaction_no_order = mock_transaction.copy()
+        mock_transaction_no_order['orderId'] = None
+        
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            mock_get_item.return_value = mock_transaction_no_order
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            # Should still return transaction details even without order
+            assert response['statusCode'] == 200
+            body = json.loads(response['body'])
+            assert body['transactionId'] == 'txn_test123'
+            assert body['orderId'] is None
+    
+    def test_razorpay_transaction(self, api_gateway_event, mock_transaction, mock_order):
+        """Test retrieval of Razorpay transaction."""
+        # Modify to Razorpay gateway
+        mock_transaction['paymentGateway'] = PaymentGateway.RAZORPAY.value
+        mock_transaction['paymentMethod'] = PaymentMethod.UPI.value
+        
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 200
+            body = json.loads(response['body'])
+            assert body['paymentGateway'] == PaymentGateway.RAZORPAY.value
+            assert body['paymentMethod'] == PaymentMethod.UPI.value
+    
+    def test_cors_headers_present(self, api_gateway_event, mock_transaction, mock_order):
+        """Test that CORS headers are present in response."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth, \
+             patch('payments.get_payment_status.get_item') as mock_get_item:
+            
+            mock_auth.return_value = {
+                'userId': 'consumer123',
+                'role': UserRole.CONSUMER.value,
+                'email': 'consumer@test.com'
+            }
+            
+            def get_item_side_effect(pk, sk):
+                if pk == 'TRANSACTION#txn_test123':
+                    return mock_transaction
+                elif pk == 'ORDER#order_test456':
+                    return mock_order
+                return None
+            
+            mock_get_item.side_effect = get_item_side_effect
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert 'Access-Control-Allow-Origin' in response['headers']
+            assert response['headers']['Access-Control-Allow-Origin'] == '*'
+    
+    def test_unexpected_error_handling(self, api_gateway_event):
+        """Test handling of unexpected errors."""
+        with patch('payments.get_payment_status.get_user_from_token') as mock_auth:
+            # Cause an unexpected error
+            mock_auth.side_effect = RuntimeError('Unexpected error')
+            
+            response = get_payment_status.handler(api_gateway_event, None)
+            
+            assert response['statusCode'] == 500
+            body = json.loads(response['body'])
+            assert body['error']['code'] == 'INTERNAL_ERROR'
+
+
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])
