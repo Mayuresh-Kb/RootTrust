@@ -466,9 +466,11 @@ Priya searches for a specific GI-registered regional crop on RootTrust. She filt
 ### Technical Risks
 
 1. **Data Quality**: Poor quality mandi data may reduce forecast accuracy
+
    - Mitigation: Validate data sources, implement data quality checks, use multiple sources
 
 2. **GPS Inaccuracy**: GPS errors may cause incorrect GI verification
+
    - Mitigation: Set tolerance thresholds, allow manual location correction, display verification criteria
 
 3. **Scalability**: Platform may not scale beyond MVP without architecture changes
@@ -477,9 +479,11 @@ Priya searches for a specific GI-registered regional crop on RootTrust. She filt
 ### Adoption Risks
 
 1. **Farmer Reluctance**: Farmers may not trust digital platforms or share location
+
    - Mitigation: Partner with extension officers, provide training, demonstrate value
 
 2. **Low Consumer Demand**: Insufficient consumer interest in direct sourcing
+
    - Mitigation: Target urban consumers interested in organic/authentic produce, marketing campaigns
 
 3. **Network Effects**: Platform requires critical mass of both farmers and consumers
@@ -488,9 +492,11 @@ Priya searches for a specific GI-registered regional crop on RootTrust. She filt
 ### Operational Risks
 
 1. **Data Maintenance**: Keeping GI mappings and crop data current requires ongoing effort
+
    - Mitigation: Design admin tools for easy updates, automate data refresh where possible
 
 2. **Support Burden**: High support requests from low-literacy users
+
    - Mitigation: Invest in UX design, provide comprehensive help documentation, video tutorials
 
 3. **Misuse**: Users may provide false information or misuse contact details
