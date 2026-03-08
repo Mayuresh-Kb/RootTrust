@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
+import logo from "../../assets/logo.png";
 
 export default function Navigation() {
   const { user, logout } = useAuth();
@@ -19,17 +20,11 @@ export default function Navigation() {
               to="/"
               className="text-2xl font-bold hover:opacity-90 transition flex items-center"
             >
-              <svg
-                className="w-8 h-8 mr-2"
-                fill="currentColor"
-                viewBox="0 0 20 20"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z"
-                  clipRule="evenodd"
-                />
-              </svg>
+              <img
+                src={logo}
+                alt="RootTrust Logo"
+                className="w-8 h-8 mr-2 object-contain"
+              ></img>
               RootTrust
             </Link>
             <div className="flex gap-3">
