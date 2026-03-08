@@ -2,29 +2,37 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+/* Base styles */
+@layer base {
+  body {
+    background-color: #f5f7fa;
+    color: #111827;
+  }
 }
 
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
+/* Custom utilities */
+@layer utilities {
+  .hero-gradient {
+    background: linear-gradient(
+      135deg,
+      #e8f5e9 0%,
+      #ffffff 50%,
+      rgba(129, 199, 132, 0.2) 100%
+    );
+  }
 
-#root {
-  width: 100%;
+  .text-gradient {
+    background: linear-gradient(to right, #2e7d32, #ffb300);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .card-hover {
+    transition: all 0.3s ease;
+  }
+
+  .card-hover:hover {
+    transform: translateY(-6px);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.08);
+  }
 }

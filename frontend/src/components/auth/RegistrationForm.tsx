@@ -85,9 +85,9 @@ export default function RegistrationForm() {
 
   if (success) {
     return (
-      <div className="w-full max-w-md mx-auto p-6 bg-white rounded-lg shadow-md">
+      <div className="bg-white rounded-2xl shadow-lg p-8">
         <div className="text-center">
-          <div className="mb-4 text-green-600">
+          <div className="mb-4 text-primary">
             <svg
               className="w-16 h-16 mx-auto"
               fill="none"
@@ -102,7 +102,7 @@ export default function RegistrationForm() {
               />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold mb-2 text-gray-800">
+          <h2 className="text-2xl font-bold mb-2 text-gray-900">
             Registration Successful!
           </h2>
           <p className="text-gray-600">Redirecting to login page...</p>
@@ -112,22 +112,35 @@ export default function RegistrationForm() {
   }
 
   return (
-    <div className="w-full max-w-md mx-auto p-6 bg-white rounded-lg shadow-md">
-      <h2 className="text-2xl font-bold mb-6 text-center text-gray-800">
+    <div className="bg-white rounded-2xl shadow-lg p-8">
+      <h2 className="text-2xl font-bold mb-6 text-center text-gray-900">
         Register for RootTrust
       </h2>
 
       {error && (
-        <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
-          {error}
+        <div className="mb-4 p-4 bg-red-50 border-l-4 border-red-500 text-red-700 rounded">
+          <div className="flex items-center">
+            <svg
+              className="w-5 h-5 mr-2 flex-shrink-0"
+              fill="currentColor"
+              viewBox="0 0 20 20"
+            >
+              <path
+                fillRule="evenodd"
+                d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                clipRule="evenodd"
+              />
+            </svg>
+            {error}
+          </div>
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-5">
         <div>
           <label
             htmlFor="role"
-            className="block text-sm font-medium text-gray-700 mb-1"
+            className="block text-sm font-medium text-gray-700 mb-2"
           >
             I am a
           </label>
@@ -136,7 +149,7 @@ export default function RegistrationForm() {
             name="role"
             value={formData.role}
             onChange={handleChange}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
           >
             <option value="consumer">Consumer</option>
             <option value="farmer">Farmer</option>
@@ -147,7 +160,7 @@ export default function RegistrationForm() {
           <div>
             <label
               htmlFor="firstName"
-              className="block text-sm font-medium text-gray-700 mb-1"
+              className="block text-sm font-medium text-gray-700 mb-2"
             >
               First Name
             </label>
@@ -158,14 +171,15 @@ export default function RegistrationForm() {
               value={formData.firstName}
               onChange={handleChange}
               required
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
+              placeholder="John"
             />
           </div>
 
           <div>
             <label
               htmlFor="lastName"
-              className="block text-sm font-medium text-gray-700 mb-1"
+              className="block text-sm font-medium text-gray-700 mb-2"
             >
               Last Name
             </label>
@@ -176,7 +190,8 @@ export default function RegistrationForm() {
               value={formData.lastName}
               onChange={handleChange}
               required
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
+              placeholder="Doe"
             />
           </div>
         </div>
@@ -184,9 +199,9 @@ export default function RegistrationForm() {
         <div>
           <label
             htmlFor="email"
-            className="block text-sm font-medium text-gray-700 mb-1"
+            className="block text-sm font-medium text-gray-700 mb-2"
           >
-            Email
+            Email Address
           </label>
           <input
             id="email"
@@ -195,7 +210,7 @@ export default function RegistrationForm() {
             value={formData.email}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
             placeholder="your@email.com"
           />
         </div>
@@ -203,7 +218,7 @@ export default function RegistrationForm() {
         <div>
           <label
             htmlFor="phone"
-            className="block text-sm font-medium text-gray-700 mb-1"
+            className="block text-sm font-medium text-gray-700 mb-2"
           >
             Phone Number
           </label>
@@ -214,7 +229,7 @@ export default function RegistrationForm() {
             value={formData.phone}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
             placeholder="+91 1234567890"
           />
         </div>
@@ -222,7 +237,7 @@ export default function RegistrationForm() {
         <div>
           <label
             htmlFor="password"
-            className="block text-sm font-medium text-gray-700 mb-1"
+            className="block text-sm font-medium text-gray-700 mb-2"
           >
             Password
           </label>
@@ -233,7 +248,7 @@ export default function RegistrationForm() {
             value={formData.password}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
             placeholder="Min 8 characters"
           />
         </div>
@@ -241,7 +256,7 @@ export default function RegistrationForm() {
         <div>
           <label
             htmlFor="confirmPassword"
-            className="block text-sm font-medium text-gray-700 mb-1"
+            className="block text-sm font-medium text-gray-700 mb-2"
           >
             Confirm Password
           </label>
@@ -252,7 +267,7 @@ export default function RegistrationForm() {
             value={formData.confirmPassword}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition"
             placeholder="Re-enter password"
           />
         </div>
@@ -260,17 +275,17 @@ export default function RegistrationForm() {
         <button
           type="submit"
           disabled={isLoading}
-          className="w-full bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full bg-primary text-white py-3 px-4 rounded-lg hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition font-semibold"
         >
           {isLoading ? "Registering..." : "Register"}
         </button>
       </form>
 
-      <p className="mt-4 text-center text-sm text-gray-600">
+      <p className="mt-6 text-center text-sm text-gray-600">
         Already have an account?{" "}
         <a
           href="/login"
-          className="text-green-600 hover:text-green-700 font-medium"
+          className="text-primary hover:text-primary-700 font-semibold"
         >
           Login here
         </a>

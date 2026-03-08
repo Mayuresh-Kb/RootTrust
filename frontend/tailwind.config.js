@@ -1,7 +1,13 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+
   theme: {
+    container: {
+      center: true,
+      padding: "1rem",
+    },
+
     extend: {
       colors: {
         primary: {
@@ -17,26 +23,35 @@ export default {
           800: "#2E7D32",
           900: "#1B5E20",
         },
+
         secondary: {
           DEFAULT: "#66BB6A",
           light: "#81C784",
           dark: "#43A047",
         },
+
         accent: {
           DEFAULT: "#FFB300",
           light: "#FFC107",
           dark: "#FF8F00",
         },
+
         background: {
           DEFAULT: "#F5F7FA",
           light: "#FFFFFF",
           dark: "#E8F5E9",
         },
       },
+
       fontFamily: {
         sans: ["Inter", "system-ui", "-apple-system", "sans-serif"],
       },
+
+      boxShadow: {
+        soft: "0 10px 25px rgba(0,0,0,0.05)",
+      },
     },
   },
+
   plugins: [],
 };

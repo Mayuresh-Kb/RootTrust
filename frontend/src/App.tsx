@@ -24,14 +24,7 @@ function App() {
             <Route path="/register" element={<RegisterPage />} />
 
             {/* Consumer Routes */}
-            <Route
-              path="/consumer/dashboard"
-              element={
-                <ProtectedRoute requiredRole="consumer">
-                  <ConsumerDashboard />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/consumer/dashboard" element={<ConsumerDashboard />} />
             <Route
               path="/consumer/products/:productId"
               element={
